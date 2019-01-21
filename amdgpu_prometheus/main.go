@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,9 +12,7 @@ import (
 	"time"
 
 	"../config"
-
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"../export"
 )
 
 const (
@@ -53,24 +50,6 @@ func getpmInfoFiles(list *[]pmInfoFile) error {
 	return err
 }
 
-func createCollectors(clocks map[string]string, collectors *map[string](*prometheus.GaugeVec)) {
-	(*collectors)[clock] =
-		prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "amdgpu_clock", Help: "GPU Clock Rate in MHz"}, []string{"gpu", "name"})
-
-	(*collectors)[power] =
-		prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "amdgpu_power", Help: "GPU Power Consumption in Watts"}, []string{"gpu", "name"})
-
-	(*collectors)[temp] =
-		prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "amdgpu_temp", Help: "GPU Temperature in Celcius"}, []string{"gpu"})
-
-	(*collectors)[load] =
-		prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "amdgpu_load", Help: "GPU Load Percentage"}, []string{"gpu"})
-
-	for _, c := range *collectors {
-		prometheus.MustRegister(c)
-	}
-}
-
 func mapRegexp(text string, expression string) map[string]string {
 	var res = make(map[string]string)
 
@@ -89,7 +68,6 @@ func mapRegexp(text string, expression string) map[string]string {
 }
 
 func main() {
-
 	var (
 		expressions = map[string]string{
 			clock: `(?P<val>[0-9]+(?:\.[0-9]+)?) MHz \((?P<name>(?:[A-Za-z0-9\ ]+))\)`,
@@ -99,9 +77,11 @@ func main() {
 		}
 
 		pmInfoFileList []pmInfoFile
-		cfg            *config.Config = config.NewConfig(programName)
-		collectors                    = make(map[string](*prometheus.GaugeVec))
+		cfg            *config.Config  = config.NewConfig(programName)
+		exporter       export.Exporter = export.NewPrometheus(cfg.Prometheus.Address())
 	)
+
+	exporter = export.NewPrometheus(cfg.Prometheus.Address())
 
 	err := getpmInfoFiles(&pmInfoFileList)
 	if err != nil {
@@ -120,25 +100,11 @@ func main() {
 
 					fmt.Println(text)
 
-					if len(collectors) == 0 {
-						createCollectors(mapRegexp(text, expressions[clock]), &collectors)
-					}
-
-					for _, ctype := range [2]string{clock, power} {
+					for _, ctype := range []string{clock, power, temp, load} {
 						for name, value := range mapRegexp(text, expressions[ctype]) {
-							fValue, _ := strconv.ParseFloat(value, 64)
-							collectors[ctype].With(prometheus.Labels{"gpu": gpu, "name": name}).Set(fValue)
+							exporter.Export(ctype, gpu, name, value)
 						}
 					}
-
-					for _, ctype := range [2]string{temp, load} {
-						for name, value := range mapRegexp(text, expressions[ctype]) {
-							log.Printf("name %v value %v", name, value)
-							fValue, _ := strconv.ParseFloat(value, 64)
-							collectors[ctype].With(prometheus.Labels{"gpu": gpu}).Set(fValue)
-						}
-					}
-
 				} else {
 					log.Printf("Error reading file %v: %v\n", info.path, err)
 				}
@@ -148,8 +114,5 @@ func main() {
 		}
 	}()
 
-	// The Handler function provides a default handler to expose metrics
-	// via an HTTP server. "/metrics" is the usual endpoint for that.
-	http.Handle("/metrics", promhttp.Handler())
-	log.Fatal(http.ListenAndServe(cfg.Prometheus.Address(), nil))
+	exporter.Setup()
 }
