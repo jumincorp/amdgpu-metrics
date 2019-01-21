@@ -4,15 +4,18 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/prometheus/client_golang/prometheus"
+	"time"
 
 	"../config"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const (
@@ -24,33 +27,52 @@ const (
 	load  = "load"
 )
 
-var (
-	minerGpuHashRate = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "miner_gpu_hashrate",
-			Help: "Current hash rate of a GPU.",
-		},
-		[]string{"miner", "gpu", "symbol"},
-	)
-
-	cfg *config.Config
-)
-
-func init() {
-	cfg = config.NewConfig(programName)
-
-	// Metrics have to be registered to be exposed:
-	//prometheus.MustRegister(minerTotalHashRate)
-	prometheus.MustRegister(minerGpuHashRate)
-}
-
 type pmInfoFile struct {
 	gpu  int
 	path string
 }
 
-func mapRegexp(text string, expression string) []map[string]string {
-	var res []map[string]string
+//
+// Find all amd_gpu_pm_info files
+//
+func getpmInfoFiles(list *[]pmInfoFile) error {
+	err := filepath.Walk("/sys/kernel/debug/dri", func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.Name() == "amdgpu_pm_info" {
+			dir, _ := filepath.Split(path)
+			dirList := strings.Split(strings.Trim(dir, "/"), "/")
+			gpuString := dirList[len(dirList)-1]
+			gpu, _ := strconv.Atoi(gpuString)
+
+			*list = append(*list, pmInfoFile{gpu: gpu, path: path})
+		}
+		return nil
+	})
+	return err
+}
+
+func createCollectors(clocks map[string]string, collectors *map[string](*prometheus.GaugeVec)) {
+	(*collectors)[clock] =
+		prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "amdgpu_clock", Help: "GPU Clock Rate in MHz"}, []string{"gpu", "name"})
+
+	(*collectors)[power] =
+		prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "amdgpu_power", Help: "GPU Power Consumption in Watts"}, []string{"gpu", "name"})
+
+	(*collectors)[temp] =
+		prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "amdgpu_temp", Help: "GPU Temperature in Celcius"}, []string{"gpu"})
+
+	(*collectors)[load] =
+		prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "amdgpu_load", Help: "GPU Load Percentage"}, []string{"gpu"})
+
+	for _, c := range *collectors {
+		prometheus.MustRegister(c)
+	}
+}
+
+func mapRegexp(text string, expression string) map[string]string {
+	var res = make(map[string]string)
 
 	r := regexp.MustCompile(expression)
 
@@ -61,7 +83,7 @@ func mapRegexp(text string, expression string) []map[string]string {
 		for i, submatch := range submatchList[1:] {
 			m[subexpNames[i+1]] = submatch
 		}
-		res = append(res, m)
+		res[m["name"]] = m["val"]
 	}
 	return res
 }
@@ -77,81 +99,57 @@ func main() {
 		}
 
 		pmInfoFileList []pmInfoFile
+		cfg            *config.Config = config.NewConfig(programName)
+		collectors                    = make(map[string](*prometheus.GaugeVec))
 	)
 
-	//
-	// Find all amd_gpu_pm_info files
-	//
-	filepath.Walk("/sys/kernel/debug/dri", func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.Name() == "amdgpu_pm_info" {
-			dir, _ := filepath.Split(path)
-			dirList := strings.Split(strings.Trim(dir, "/"), "/")
-			gpuString := dirList[len(dirList)-1]
-			gpu, _ := strconv.Atoi(gpuString)
-
-			pmInfoFileList = append(pmInfoFileList, pmInfoFile{gpu: gpu, path: path})
-		}
-		return nil
-	})
-
-	for _, info := range pmInfoFileList {
-		log.Printf("gpu %d, path %s", info.gpu, info.path)
-
-		bytes, err := ioutil.ReadFile(info.path)
-		if err == nil {
-			text := string(bytes)
-
-			fmt.Println(text)
-
-			res := mapRegexp(text, expressions[clock])
-			fmt.Printf("list %v\n", res)
-
-			res = mapRegexp(text, expressions[power])
-			fmt.Printf("list %v\n", res)
-
-			res = mapRegexp(text, expressions[temp])
-			fmt.Printf("temp %v\n", res[0]["val"])
-
-			res = mapRegexp(text, expressions[load])
-			fmt.Printf("load %v\n", res[0]["val"])
-
-			//r2 := regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?) W \(max GPU\)`)
-			//fmt.Println(r2.FindStringSubmatch(text))
-
-			//r3 := regexp.MustCompile(`(?P<value>[0-9]+(?:\.[0-9]+)?) W \((?P<stat>(?:[A-Za-z0-9\ ]+))\)`)
-			//fmt.Println(r3.FindAllStringSubmatch(text, -1))
-			//fmt.Println(r3.SubexpNames())
-
-			//r4 := regexp.MustCompile(strings.Join(expressions, "|"))
-			//fmt.Println(r4.FindAllStringSubmatch(text, -1))
-			//fmt.Println(r4.SubexpNames())
-
-		} else {
-			log.Printf("Error reading file %v: %v\n", info.path, err)
-		}
+	err := getpmInfoFiles(&pmInfoFileList)
+	if err != nil {
+		log.Fatal("Cannot read amdgpu_pm_info files\n")
 	}
 
-	//go func() {
-	//for {
+	go func() {
+		for {
+			for _, info := range pmInfoFileList {
+				log.Printf("gpu %d, path %s", info.gpu, info.path)
+				gpu := strconv.Itoa(info.gpu)
 
-	//minerGpuHashRate.With(prometheus.Labels{
-	//"miner":  cfg.Miner.Program(),
-	//"gpu":    fmt.Sprintf("GPU%d", device.ID),
-	//"symbol": cfg.Miner.Symbol(),
-	//}).Set(device.MHS20S)
-	//} else {
-	//log.Printf("Error connecting to miner: %v\n", err)
-	//}
+				bytes, err := ioutil.ReadFile(info.path)
+				if err == nil {
+					text := string(bytes)
 
-	//time.Sleep(time.Second * cfg.QueryDelay())
-	//}
-	//}()
+					fmt.Println(text)
+
+					if len(collectors) == 0 {
+						createCollectors(mapRegexp(text, expressions[clock]), &collectors)
+					}
+
+					for _, ctype := range [2]string{clock, power} {
+						for name, value := range mapRegexp(text, expressions[ctype]) {
+							fValue, _ := strconv.ParseFloat(value, 64)
+							collectors[ctype].With(prometheus.Labels{"gpu": gpu, "name": name}).Set(fValue)
+						}
+					}
+
+					for _, ctype := range [2]string{temp, load} {
+						for name, value := range mapRegexp(text, expressions[ctype]) {
+							log.Printf("name %v value %v", name, value)
+							fValue, _ := strconv.ParseFloat(value, 64)
+							collectors[ctype].With(prometheus.Labels{"gpu": gpu}).Set(fValue)
+						}
+					}
+
+				} else {
+					log.Printf("Error reading file %v: %v\n", info.path, err)
+				}
+			}
+
+			time.Sleep(time.Second * cfg.QueryDelay())
+		}
+	}()
 
 	// The Handler function provides a default handler to expose metrics
 	// via an HTTP server. "/metrics" is the usual endpoint for that.
-	//http.Handle("/metrics", promhttp.Handler())
-	//log.Fatal(http.ListenAndServe(cfg.Prometheus.Address(), nil))
+	http.Handle("/metrics", promhttp.Handler())
+	log.Fatal(http.ListenAndServe(cfg.Prometheus.Address(), nil))
 }
