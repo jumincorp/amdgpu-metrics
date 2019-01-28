@@ -4,7 +4,7 @@
 *.dll
 *.so
 *.dylib
-amdgpu_prometheus/amdgpu_prometheus
+amdgpu-metrics/amdgpu-metrics
 
 # Test binary, build with `go test -c`
 *.test
