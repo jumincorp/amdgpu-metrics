@@ -11,18 +11,33 @@ import (
 	"strings"
 	"time"
 
-	"../config"
-	"../export"
+	"github.com/jumincorp/constrictor"
+	"github.com/jumincorp/micrometrics"
 )
 
 const (
-	programName = "amdgpu_prometheus"
+	programName = "amdgpu-metrics"
 
 	clock = "clock"
 	power = "power"
 	temp  = "temp"
 	load  = "load"
 )
+
+var (
+	label             = constrictor.StringVar("label", "l", "default", "Label to identify this data")
+	prometheusAddress = constrictor.AddressPortVar("prometheus", "p", ":40011", "Address:Port to expose to Prometheus")
+	queryDelay        = constrictor.TimeDurationVar("time", "t", "30", "Delay between reading files")
+
+	exporter micrometrics.Exporter
+)
+
+func init() {
+	constrictor.App(programName, "AMD GPU Metrics", "Export AMD GPU current values")
+
+	log.Printf("label %s prometheus %s\n", label(), prometheusAddress())
+	exporter = micrometrics.NewPrometheusExporter(prometheusAddress())
+}
 
 type pmInfoFile struct {
 	gpu  int
@@ -77,11 +92,7 @@ func main() {
 		}
 
 		pmInfoFileList []pmInfoFile
-		cfg            *config.Config  = config.NewConfig(programName)
-		exporter       export.Exporter = export.NewPrometheus(cfg.Prometheus.Address())
 	)
-
-	exporter = export.NewPrometheus(cfg.Prometheus.Address())
 
 	err := getpmInfoFiles(&pmInfoFileList)
 	if err != nil {
@@ -90,6 +101,8 @@ func main() {
 
 	go func() {
 		for {
+			metrics := make([]micrometrics.Metric, 0)
+
 			for _, info := range pmInfoFileList {
 				log.Printf("gpu %d, path %s", info.gpu, info.path)
 				gpu := strconv.Itoa(info.gpu)
@@ -98,19 +111,26 @@ func main() {
 				if err == nil {
 					text := string(bytes)
 
-					fmt.Println(text)
-
 					for _, ctype := range []string{clock, power, temp, load} {
 						for name, value := range mapRegexp(text, expressions[ctype]) {
-							exporter.Export(ctype, gpu, name, value)
+							labels := make(map[string]string)
+							labels["namespace"] = programName
+							labels["gpu"] = gpu
+
+							if (ctype == clock) || (ctype == power) {
+								labels["name"] = name
+							}
+							if floatValue, err := strconv.ParseFloat(value, 64); err == nil {
+								metrics = append(metrics, micrometrics.Metric{Labels: labels, Name: fmt.Sprintf("amdgpu_%s", ctype), Value: floatValue})
+							}
 						}
 					}
 				} else {
 					log.Printf("Error reading file %v: %v\n", info.path, err)
 				}
 			}
-
-			time.Sleep(time.Second * cfg.QueryDelay())
+			exporter.Export(metrics)
+			time.Sleep(time.Second * queryDelay())
 		}
 	}()
 
