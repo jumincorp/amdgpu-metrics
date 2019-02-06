@@ -27,7 +27,7 @@ const (
 var (
 	label             = constrictor.StringVar("label", "l", "default", "Label to identify this data")
 	prometheusAddress = constrictor.AddressPortVar("prometheus", "p", ":40011", "Address:Port to expose to Prometheus")
-	queryDelay        = constrictor.TimeDurationVar("time", "t", "30", "Delay between reading files")
+	queryDelay        = constrictor.TimeDurationVar("time", "t", "30s", "Delay between reading files")
 
 	exporter micrometrics.Exporter
 )
@@ -130,7 +130,7 @@ func main() {
 				}
 			}
 			exporter.Export(metrics)
-			time.Sleep(time.Second * queryDelay())
+			time.Sleep(queryDelay())
 		}
 	}()
 
