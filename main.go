@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/jumincorp/constrictor"
-	"github.com/jumincorp/micrometrics"
+	"github.com/jumincorp/micrometric"
 )
 
 const (
@@ -29,15 +29,10 @@ var (
 	prometheusAddress = constrictor.AddressPortVar("prometheus", "p", ":40011", "Address:Port to expose to Prometheus")
 	queryDelay        = constrictor.TimeDurationVar("time", "t", "30s", "Delay between reading files")
 
-	exporter micrometrics.Exporter
+	app = constrictor.NewApp(programName, "AMD GPU Metrics", "Export AMD GPU current values", run)
+
+	exporter micrometric.Exporter
 )
-
-func init() {
-	constrictor.App(programName, "AMD GPU Metrics", "Export AMD GPU current values")
-
-	log.Printf("label %s prometheus %s\n", label(), prometheusAddress())
-	exporter = micrometrics.NewPrometheusExporter(prometheusAddress())
-}
 
 type pmInfoFile struct {
 	gpu  int
@@ -82,7 +77,7 @@ func mapRegexp(text string, expression string) map[string]string {
 	return res
 }
 
-func main() {
+func run([]string) error {
 	var (
 		expressions = map[string]string{
 			clock: `(?P<val>[0-9]+(?:\.[0-9]+)?) MHz \((?P<name>(?:[A-Za-z0-9\ ]+))\)`,
@@ -99,9 +94,13 @@ func main() {
 		log.Fatal("Cannot read amdgpu_pm_info files\n")
 	}
 
+	log.Printf("label %s prometheus %s\n", label(), prometheusAddress())
+
+	exporter = micrometric.NewPrometheusExporter(prometheusAddress())
+
 	go func() {
 		for {
-			metrics := make([]micrometrics.Metric, 0)
+			metrics := make([]micrometric.Metric, 0)
 
 			for _, info := range pmInfoFileList {
 				log.Printf("gpu %d, path %s", info.gpu, info.path)
@@ -121,7 +120,7 @@ func main() {
 								labels["name"] = name
 							}
 							if floatValue, err := strconv.ParseFloat(value, 64); err == nil {
-								metrics = append(metrics, micrometrics.Metric{Labels: labels, Name: fmt.Sprintf("amdgpu_%s", ctype), Value: floatValue})
+								metrics = append(metrics, micrometric.Metric{Labels: labels, Name: fmt.Sprintf("amdgpu_%s", ctype), Value: floatValue})
 							}
 						}
 					}
@@ -134,5 +133,9 @@ func main() {
 		}
 	}()
 
-	exporter.Setup()
+	return exporter.Serve()
+}
+
+func main() {
+	app.Execute()
 }
